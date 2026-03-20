@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
-# Lightweight EMS helper script for GoodWe ET inverters.
-# v0.1 kormik@16mar2026
+# Lightweight EMS helper script for GoodWe ET inverters
+# v0.2 kormik@20mar2026
+
 import argparse
 import asyncio
 import logging
-import math
 from datetime import datetime
 
 import goodwe
 import requests
 
-# defaults
-DEFAULT_HOURS_AHEAD = 8
+
+# Default parameters
+DEFAULT_HOURS_AHEAD = 6
 DEFAULT_MIN_SOC = 15
 DEFAULT_MAX_SOC = 95
-SEASONAL_BONUS_FACTOR = 50
+DEFAULT_SKIP_HOURS = 2
+DEFAULT_MAX_TRIES = 3
+DEFAULT_RETRY_DELAY = 60
 
 
 class GoodWeather:
+
+    # Setup logging to file or STDOUT
     @staticmethod
     def setup_logging(log_file: str | None):
-        # Configure logger once at startup. Use file if given, otherwise log to STDOUT.
         logger = logging.getLogger()
         logger.setLevel(logging.INFO)
         logger.handlers.clear()
@@ -30,16 +34,16 @@ class GoodWeather:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-        # Return shortcut function: log("msg %s", value)
         return logger.info
 
+    # Get irradiance forecast and sunset time from Open-Meteo
     @staticmethod
-    def fetch_cloud_cover(lat, lon, hours):
-        # Pull hourly cloud cover forecast from Open-Meteo for given location.
+    def get_forecast(lat, lon, hours):
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&hourly=cloud_cover"
+            "&hourly=shortwave_radiation"
+            "&daily=sunset"
             "&timezone=auto"
         )
 
@@ -48,162 +52,244 @@ class GoodWeather:
         data = r.json()
 
         times = data["hourly"]["time"]
-        clouds = data["hourly"]["cloud_cover"]
+        radiation = data["hourly"]["shortwave_radiation"]
 
         now = datetime.now().astimezone()
         rows = []
 
-        # Keep only current/future points, then trim to requested horizon.
-        for t, c in zip(times, clouds):
+        for t, rad in zip(times, radiation):
             dt = datetime.fromisoformat(t).astimezone(now.tzinfo)
             if dt >= now:
-                rows.append({"time": dt, "cloud": float(c)})
+                rows.append({"time": dt, "irr": float(rad)})
 
-        return rows[:hours]
+        # next sunset
+        sunsets = [
+            datetime.fromisoformat(t).astimezone(now.tzinfo)
+            for t in data["daily"]["sunset"]
+        ]
 
+        next_sunset = None
+        for s in sunsets:
+            if s >= now:
+                next_sunset = s
+                break
+
+        return rows[:hours], next_sunset
+
+    # Compute average irradiance over selected hours
     @staticmethod
-    def compute_cloud_cover_score(forecast):
+    def calculate_avg_irradiance(forecast):
         if not forecast:
-            raise RuntimeError("No forecast data")
+            raise RuntimeError("No irradiance data")
 
-        weights = []
-        values = []
+        return sum(item["irr"] for item in forecast) / len(forecast)
 
-        # Weighted average where near-term hours matter more than later hours.
-        for i, item in enumerate(forecast):
-            weight = max(1.0, len(forecast) - i)
-            weights.append(weight)
-            values.append(item["cloud"])
-
-        return sum(v * w for v, w in zip(values, weights)) / sum(weights)
-
+    # Convert irradiance to desired SOC
+    # More sun -> lower need to charge from grid
     @staticmethod
-    def daylight_factor(lat):
-        now = datetime.now()
-        day_of_year = now.timetuple().tm_yday
-        lat_rad = math.radians(lat)
-
-        # Approximate solar declination for current day of year.
-        decl = math.radians(23.44 * math.sin(math.radians(360 / 365 * (day_of_year - 81))))
-        cos_omega = -math.tan(lat_rad) * math.tan(decl)
-
-        # Convert sunrise/sunset hour angle to daylight duration.
-        if cos_omega >= 1:
-            daylight_hours = 0
-        elif cos_omega <= -1:
-            daylight_hours = 24
-        else:
-            omega = math.acos(cos_omega)
-            daylight_hours = 2 * omega * 24 / (2 * math.pi)
-
-        # Normalize to expected max day length.
-        max_daylight = 16.5
-        factor = daylight_hours / max_daylight
-        return max(0.2, min(1.0, factor))
-
-    @staticmethod
-    def cloud_to_soc(cloud_cover_score, min_soc, max_soc):
-        # Map 0..100 cloud score linearly to min_soc..max_soc.
-        cloud_cover_score = max(0.0, min(100.0, cloud_cover_score))
-        soc = min_soc + (cloud_cover_score / 100.0) * (max_soc - min_soc)
+    def irradiance_to_soc(irr, min_soc, max_soc):
+        irr = max(0.0, min(1000.0, irr))
+        sun_factor = irr / 1000.0
+        soc = max_soc - sun_factor * (max_soc - min_soc)
         return round(soc)
 
+    # Increase target SOC as sunset approaches
+    @staticmethod
+    def sunset_proximity_boost(target_soc, max_soc, next_sunset):
+        now = datetime.now().astimezone()
 
+        # no sunset info or already dark
+        if next_sunset is None or now >= next_sunset:
+            return max_soc, 1.0, -1.0
+
+        hours_to_sunset = (next_sunset - now).total_seconds() / 3600.0
+
+        # no increase if plenty of daylight left
+        if hours_to_sunset >= 4:
+            sunset_boost_factor = 0.0
+
+        # linear ramp during last 4 hours
+        elif hours_to_sunset > 0:
+            sunset_boost_factor = (4.0 - hours_to_sunset) / 4.0
+
+        else:
+            sunset_boost_factor = 1.0
+
+        boosted_soc = round(target_soc + sunset_boost_factor * (max_soc - target_soc))
+
+        return min(boosted_soc, max_soc), sunset_boost_factor, hours_to_sunset
+
+
+# MAIN
 async def main():
-    parser = argparse.ArgumentParser(description="GoodWeather EMS controller")
-    parser.add_argument("--inverter-ip", required=True, help="IP address of the GoodWe inverter")
-    parser.add_argument("--log-file", help="File to log to (disables STDOUT)")
-    parser.add_argument("--hours-ahead",type=int,default=DEFAULT_HOURS_AHEAD,
-                        help="Hours ahead to consider for cloud coverage")
-    parser.add_argument("--min-soc", type=int, default=DEFAULT_MIN_SOC, help="Minimum battery SOC%")
-    parser.add_argument("--max-soc", type=int, default=DEFAULT_MAX_SOC, help="Maximum battery SOC%")
-    parser.add_argument("--lat", type=float, help="Location latitude (e.g. 53.272)")
-    parser.add_argument("--lon", type=float, help="Location longitude (e.g. 16.469)")
-    parser.add_argument("--stop", action="store_true", help="Stop fast charging immediately")
-    parser.add_argument("--dry-run",action="store_true", help="Do not write inverter settings")
+    parser = argparse.ArgumentParser(
+        description="GoodWe.ather: TOU on steroids",
+    )
+    parser.add_argument(
+        "--inverter-ip", required=True, help="IP address of the GoodWe inverter"
+    )
+    parser.add_argument(
+        "--log-file",
+        help="File to log to (disables STDOUT)",
+    )
+    parser.add_argument(
+        "--hours-ahead",
+        type=int,
+        default=DEFAULT_HOURS_AHEAD,
+        help="Hours ahead to consider for cloud coverage",
+    )
+    parser.add_argument(
+        "--skip-hours",
+        type=int,
+        default=DEFAULT_SKIP_HOURS,
+        help="Initial hours to skip (assume this time is consumed during charging)",
+    )
+    parser.add_argument(
+        "--min-soc",
+        type=int,
+        default=DEFAULT_MIN_SOC,
+        help="Minimum battery SOC%",
+    )
+    parser.add_argument(
+        "--max-soc",
+        type=int,
+        default=DEFAULT_MAX_SOC,
+        help="Maximum battery SOC%",
+    )
+    parser.add_argument(
+        "--lat",
+        type=float,
+        help="Location latitude (e.g. 53.272)",
+    )
+    parser.add_argument(
+        "--lon",
+        type=float,
+        help="Location longitude (e.g. 16.469)",
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop fast charging immediately",
+    ),
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run - do not write inverter settings",
+    )
+
     args = parser.parse_args()
 
     gw = GoodWeather()
     log = gw.setup_logging(args.log_file)
 
-    log("Using inverter IP: %s", args.inverter_ip)
+    log(f"Using inverter IP: {args.inverter_ip}")
+
     if args.dry_run:
-        log("Dry-run mode enabled: write_setting calls are skipped")
+        log("Dry-run mode enabled")
 
     inverter = await goodwe.connect(args.inverter_ip, family="ET")
 
-    # Write guard: in dry-run, only log intended writes.
-    async def write_setting(name: str, value: int):
+    async def write_setting(name, value):
         if args.dry_run:
-            log("[DRY-RUN] Skipping write_setting(%s=%s)", name, value)
+            log(f"[DRY-RUN] write_setting({name}={value})")
             return
         await inverter.write_setting(name, value)
 
-    # Stop charge if requested.
     if args.stop:
         log("Stop requested: disabling fast charging")
         await write_setting("fast_charging", 0)
         return
 
-    # Validate that coordinates are provided when not stopping.
     if args.lat is None or args.lon is None:
-        parser.error("Please provide coordinates with --lat and --lon params")
+        parser.error("Please provide --lat and --lon")
 
-    log("Config: hours=%d min_soc=%d max_soc=%d", args.hours_ahead, args.min_soc, args.max_soc)
+    log(
+        f"Config: hours={args.hours_ahead} skip_hours={args.skip_hours} min_soc={args.min_soc} max_soc={args.max_soc}",
+    )
 
-    # Get cloud cover forecast for the next hours and compute a score.
-    forecast = gw.fetch_cloud_cover(args.lat, args.lon, args.hours_ahead)
+    # Get forecast
+    forecast, next_sunset = gw.get_forecast(
+        args.lat, args.lon, args.skip_hours + args.hours_ahead
+    )
 
-    log("Cloud cover forecast next %dh:", args.hours_ahead)
-    for f in forecast:
-        log("  %s -> %.0f%%", f["time"].strftime("%H:%M"), f["cloud"])
+    log(f"Irradiance forecast next {args.hours_ahead}h:")
+    for f in forecast[args.skip_hours :]:
+        log(f"  {f['time'].strftime('%H:%M')} -> {f['irr']:.0f} W/sqm")
 
-    cloud_cover_score = gw.compute_cloud_cover_score(forecast)
-    light = gw.daylight_factor(args.lat)
+    if next_sunset:
+        log(f"Next sunset: {next_sunset.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        log("Next sunset: unavailable")
 
-    # Seasonal bonus increases target SOC during shorter-day periods.
-    seasonal_bonus = (1.0 - light) * SEASONAL_BONUS_FACTOR
-    effective_cloud = min(100.0, cloud_cover_score + seasonal_bonus)
+    # Compute target SOC based on irradiance and sunset proximity
+    irradiance_score = gw.calculate_avg_irradiance(forecast[args.skip_hours :])
 
-    log("Cloud score: %.1f%%", cloud_cover_score)
-    log("Daylight factor: %.2f", light)
-    log("Seasonal bonus: %.1f%%", seasonal_bonus)
-    log("Effective cloud score: %.1f%%", effective_cloud)
+    irradiance_based_target_soc = gw.irradiance_to_soc(
+        irradiance_score,
+        args.min_soc,
+        args.max_soc,
+    )
 
-    # Map cloud score to target SOC.
-    target_soc = gw.cloud_to_soc(effective_cloud, args.min_soc, args.max_soc)
-    log("Target SOC: %d%%", target_soc)
+    target_soc, sunset_boost_factor, hours_to_sunset = gw.sunset_proximity_boost(
+        irradiance_based_target_soc,
+        args.max_soc,
+        next_sunset,
+    )
 
+    log(f"Average irradiance: {irradiance_score:.1f} W/sqm")
+    log(f"Irradiance based target SOC: {irradiance_based_target_soc}%")
+
+    if hours_to_sunset >= 0:
+        log(f"Hours to sunset: {hours_to_sunset:.2f}")
+        log(f"Sunset boost factor: {sunset_boost_factor:.2f}")
+
+    log(f"Final target SOC: {target_soc}%")
+
+    # Inverter state
     runtime = await inverter.read_runtime_data()
     current_soc = int(runtime["battery_soc"])
-    log("Current SOC: %d%%", current_soc)
 
-    # Get current target to avoid unnecessary updates.
+    log(f"Current SOC: {current_soc}%")
+
     try:
         current_target = await inverter.read_setting("fast_charging_soc")
-        log("Current fast_charging_soc: %s", current_target)
+        log(f"Current fast_charging_soc: {current_target}")
     except Exception:
         current_target = None
         log("Could not read fast_charging_soc")
 
-    # If battery already reached target, ensure fast charging is off.
+    # Control logic
     if current_soc >= target_soc:
         log("SOC >= target -> disabling fast charging")
         await write_setting("fast_charging", 0)
         return
 
-    # Update inverter target only when needed.
     if current_target is None or int(current_target) != target_soc:
-        log("Setting fast_charging_soc to %d%%", target_soc)
+        log(f"Setting fast_charging_soc to {target_soc}%")
         await write_setting("fast_charging_soc", target_soc)
     else:
         log("Target already set")
 
-    # Enable fast charging to reach target.
     log("Turning on fast charging")
     await write_setting("fast_charging", 1)
-    log("Charging towards %d%%", target_soc)
+
+    log(f"Charging towards {target_soc}%")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    for attempt in range(1, DEFAULT_MAX_TRIES + 1):
+        try:
+            asyncio.run(main())
+            break
+        except Exception as e:
+            logging.basicConfig(
+                level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s"
+            )
+            logging.exception(f"Error (attempt {attempt}/{DEFAULT_MAX_TRIES}): {e}")
+
+            if attempt >= DEFAULT_MAX_TRIES:
+                raise
+
+            logging.error(f"Retrying in {DEFAULT_RETRY_DELAY} seconds...")
+            __import__("time").sleep(DEFAULT_RETRY_DELAY)

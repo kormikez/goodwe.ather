@@ -20,14 +20,15 @@ python3 goodweather.py --inverter-ip 192.168.0.123 --lat 53.272 --lon 16.469
 
 ### Options
 
-- `--inverter-ip`: The IP of your GoodWe device
-- `--lat`, `--lon`: Coordinates of your location
-- `--hours-ahead`: Hours ahead to consider for cloud coverage
-- `--min-soc` Minimum charge %
-- `--max-soc` Maximum charge %
-- `--log-file`: Write logs to file instead of stdout
-- `--stop` Immediately stop fast charging
-- `--dry-run` Allows testing your settings; skips all inverter writes
+- `--inverter-ip`: The IP of your GoodWe device (default: unset)
+- `--lat`, `--lon`: Coordinates of your location (default: unset)
+- `--hours-ahead`:  Hours ahead to consider for cloud coverage (default: `6`)
+- `--skip-hours`:  Initial hours to skip (assume this time is consumed during charging; default: `2`)
+- `--min-soc`: Minimum charge % (default: `15`)
+- `--max-soc`: Maximum charge % (default: `95`)
+- `--log-file`: Write logs to file instead of stdout (default: unset)
+- `--stop`: Immediately stop fast charging (default: `False`)
+- `--dry-run`: Allows testing your settings; skips all inverter writes (default: `False`)
 
 ### Examples
 
@@ -59,53 +60,55 @@ Charge daily during the low tariff periods — 4:00–6:00 AM and 1:00–3:00 PM
 
 ### Example run results:
 ```
-python3 goodweather.py --inverter-ip 192.168.88.177 --lat 52.38 --lon 16.83 --max-soc 90
-2026-03-15 04:00:05,653 [INFO] Using inverter IP: ***
-2026-03-15 04:00:06,210 [INFO] Config: hours=8 min_soc=15 max_soc=90
-2026-03-15 04:00:06,359 [INFO] Cloud cover forecast next 8h:
-2026-03-15 04:00:06,360 [INFO]   05:00 -> 100%
-2026-03-15 04:00:06,360 [INFO]   06:00 -> 100%
-2026-03-15 04:00:06,360 [INFO]   07:00 -> 98%
-2026-03-15 04:00:06,361 [INFO]   08:00 -> 73%
-2026-03-15 04:00:06,361 [INFO]   09:00 -> 100%
-2026-03-15 04:00:06,361 [INFO]   10:00 -> 100%
-2026-03-15 04:00:06,362 [INFO]   11:00 -> 100%
-2026-03-15 04:00:06,362 [INFO]   12:00 -> 98%
-2026-03-15 04:00:06,362 [INFO] Cloud score: 95.9%
-2026-03-15 04:00:06,363 [INFO] Daylight factor: 0.70
-2026-03-15 04:00:06,363 [INFO] Seasonal bonus: 14.9%
-2026-03-15 04:00:06,363 [INFO] Effective cloud score: 100.0%
-2026-03-15 04:00:06,364 [INFO] Target SOC: 90%
-2026-03-15 04:00:09,069 [INFO] Current SOC: 23%
-2026-03-15 04:00:09,227 [INFO] Current fast_charging_soc: 95
-2026-03-15 04:00:09,228 [INFO] Setting fast_charging_soc to 90%
-2026-03-15 04:00:09,228 [INFO] Turning on fast charging
-2026-03-15 04:00:09,229 [INFO] Charging towards 90%
+python3 goodweather.py --inverter-ip *** --lat 52.38 --lon 16.83 --max-soc 50
+2026-03-19 04:00:05,973 [INFO] Using inverter IP: ***
+2026-03-19 04:00:05,973 [INFO] Dry-run mode enabled
+2026-03-19 04:00:06,530 [INFO] Config: hours=6 skip_hours=2 min_soc=15 max_soc=50
+2026-03-19 04:00:06,686 [INFO] Irradiance forecast next 6h:
+2026-03-19 04:00:06,686 [INFO]   07:00 -> 234 W/sqm
+2026-03-19 04:00:06,687 [INFO]   08:00 -> 255 W/sqm
+2026-03-19 04:00:06,687 [INFO]   09:00 -> 276 W/sqm
+2026-03-19 04:00:06,687 [INFO]   10:00 -> 230 W/sqm
+2026-03-19 04:00:06,688 [INFO]   11:00 -> 156 W/sqm
+2026-03-19 04:00:06,688 [INFO]   12:00 -> 114 W/sqm
+2026-03-19 04:00:06,688 [INFO] Next sunset: 2026-03-19 18:05
+2026-03-19 04:00:06,689 [INFO] Average irradiance: 210.9 W/sqm
+2026-03-19 04:00:06,689 [INFO] Irradiance based target SOC: 43%
+2026-03-19 04:00:06,689 [INFO] Hours to sunset: 9.19
+2026-03-19 04:00:06,689 [INFO] Sunset boost factor: 0.00
+2026-03-19 04:00:06,690 [INFO] Final target SOC: 43%
+2026-03-19 04:00:07,416 [INFO] Current SOC: 19%
+2026-03-19 04:00:07,575 [INFO] Current fast_charging_soc: 66
+2026-03-19 04:00:07,575 [INFO] Setting fast_charging_soc to 43%
+2026-03-19 04:00:07,576 [INFO] Turning on fast charging
+2026-03-19 04:00:07,576 [INFO] Charging towards 43%
 ```
 
 ```
-python3 goodweather.py --inverter-ip *** --lat 51.25 --lon 22.57 --dry-run
-2026-03-16 10:15:32,334 [INFO] Using inverter IP: ***
-2026-03-16 10:15:32,335 [INFO] Dry-run mode enabled: write_setting calls are skipped
-2026-03-16 10:15:32,887 [INFO] Config: hours=8 min_soc=15 max_soc=95
-2026-03-16 10:15:33,031 [INFO] Cloud cover forecast next 8h:
-2026-03-16 10:15:33,032 [INFO]   11:00 -> 0%
-2026-03-16 10:15:33,032 [INFO]   12:00 -> 0%
-2026-03-16 10:15:33,033 [INFO]   13:00 -> 0%
-2026-03-16 10:15:33,033 [INFO]   14:00 -> 0%
-2026-03-16 10:15:33,033 [INFO]   15:00 -> 33%
-2026-03-16 10:15:33,034 [INFO]   16:00 -> 30%
-2026-03-16 10:15:33,034 [INFO]   17:00 -> 2%
-2026-03-16 10:15:33,034 [INFO]   18:00 -> 0%
-2026-03-16 10:15:33,035 [INFO] Cloud score: 6.3%
-2026-03-16 10:15:33,035 [INFO] Daylight factor: 0.70
-2026-03-16 10:15:33,035 [INFO] Seasonal bonus: 14.9%
-2026-03-16 10:15:33,036 [INFO] Effective cloud score: 21.1%
-2026-03-16 10:15:33,036 [INFO] Target SOC: 32%
-2026-03-16 10:15:34,055 [INFO] Current SOC: 78%
-2026-03-16 10:15:34,215 [INFO] Current fast_charging_soc: 95
-2026-03-16 10:15:34,215 [INFO] SOC >= target -> disabling fast charging
-2026-03-16 10:15:34,215 [INFO] [DRY-RUN] Skipping write_setting(fast_charging=0)
+python3 goodweather.py --inverter-ip *** --lat 28.12 --lon -15.43 --max-soc 100 --dry-run --skip-hours 5
+2026-03-20 09:05:16,233 [INFO] Using inverter IP: ***
+2026-03-20 09:05:16,233 [INFO] Dry-run mode enabled
+2026-03-20 09:05:17,604 [INFO] Config: hours=6 skip_hours=5 min_soc=15 max_soc=100
+2026-03-20 09:05:17,732 [INFO] Irradiance forecast next 6h:
+2026-03-20 09:05:17,732 [INFO]   15:00 -> 886 W/sqm
+2026-03-20 09:05:17,733 [INFO]   16:00 -> 758 W/sqm
+2026-03-20 09:05:17,733 [INFO]   17:00 -> 571 W/sqm
+2026-03-20 09:05:17,733 [INFO]   18:00 -> 343 W/sqm
+2026-03-20 09:05:17,734 [INFO]   19:00 -> 110 W/sqm
+2026-03-20 09:05:17,734 [INFO]   20:00 -> 2 W/sqm
+2026-03-20 09:05:17,734 [INFO] Next sunset: 2026-03-20 19:13
+2026-03-20 09:05:17,735 [INFO] Average irradiance: 444.9 W/sqm
+2026-03-20 09:05:17,735 [INFO] Irradiance based target SOC: 62%
+2026-03-20 09:05:17,735 [INFO] Hours to sunset: 10.13
+2026-03-20 09:05:17,736 [INFO] Sunset boost factor: 0.00
+2026-03-20 09:05:17,736 [INFO] Final target SOC: 62%
+2026-03-20 09:05:18,488 [INFO] Current SOC: 16%
+2026-03-20 09:05:18,645 [INFO] Current fast_charging_soc: 45
+2026-03-20 09:05:18,645 [INFO] Setting fast_charging_soc to 62%
+2026-03-20 09:05:18,646 [INFO] [DRY-RUN] write_setting(fast_charging_soc=62)
+2026-03-20 09:05:18,646 [INFO] Turning on fast charging
+2026-03-20 09:05:18,647 [INFO] [DRY-RUN] write_setting(fast_charging=1)
+2026-03-20 09:05:18,647 [INFO] Charging towards 62%
 ```
 
 ---
