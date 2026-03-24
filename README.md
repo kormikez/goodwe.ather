@@ -2,9 +2,7 @@
 
 Lightweight EMS helper script for GoodWe ET inverters.
 
-It uses `fast_charging` feature of the inverter to charge battery based on:
-- cloud coverate forecast from open-meteo.com for given location
-- season/daylight factor
+It uses `fast_charging` feature of the inverter to charge battery based Solar Irradiance forecast for a given location.
 
 It is configurable in terms of expected SOC%, as well as weather forecast time window.
 
